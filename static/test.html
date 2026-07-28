@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tokenizer 测试</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+  <style>[v-cloak]{display:none}</style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen font-sans">
+<div id="app" v-cloak class="max-w-2xl mx-auto px-4 py-10">
+  <div class="flex items-center justify-between mb-6">
+    <h1 class="text-2xl font-bold">分词测试</h1>
+    <a href="/" class="text-sm text-gray-400 hover:text-white">← 控制面板</a>
+  </div>
+
+  <label class="block text-sm text-gray-400 mb-1">Bearer Token</label>
+  <input v-model="token" type="password" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm mb-4" />
+
+  <div class="space-y-3 mb-4">
+    <div>
+      <label class="text-xs text-gray-400">ja</label>
+      <input v-model="ja" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="ガンダム" />
+    </div>
+    <div>
+      <label class="text-xs text-gray-400">zh-Hans</label>
+      <input v-model="zh" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="高达" />
+    </div>
+    <div>
+      <label class="text-xs text-gray-400">en-US</label>
+      <input v-model="en" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="Gundam" />
+    </div>
+    <div>
+      <label class="text-xs text-gray-400">ko</label>
+      <input v-model="ko" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm" placeholder="건담" />
+    </div>
+  </div>
+
+  <button @click="run" :disabled="loading" class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded-lg px-4 py-2 text-sm font-medium">
+    {{ loading ? '分词中…' : 'POST /api/tokens' }}
+  </button>
+  <p v-if="error" class="text-red-400 text-sm mt-3">{{ error }}</p>
+  <pre v-if="result" class="mt-4 bg-gray-900 border border-gray-700 rounded-xl p-4 text-sm whitespace-pre-wrap">{{ result }}</pre>
+</div>
+<script>
+const { createApp, ref } = Vue
+createApp({
+  setup() {
+    const token = ref(localStorage.getItem('tokenizer_token') || '')
+    const ja = ref('ガンダム')
+    const zh = ref('高达')
+    const en = ref('Gundam')
+    const ko = ref('')
+    const loading = ref(false)
+    const result = ref('')
+    const error = ref('')
+
+    async function run() {
+      loading.value = true
+      error.value = ''
+      result.value = ''
+      localStorage.setItem('tokenizer_token', token.value)
+      const texts = [{}]
+      if (ja.value.trim()) texts[0].ja = ja.value.trim()
+      if (zh.value.trim()) texts[0]['zh-Hans'] = zh.value.trim()
+      if (en.value.trim()) texts[0]['en-US'] = en.value.trim()
+      if (ko.value.trim()) texts[0].ko = ko.value.trim()
+      try {
+        const res = await fetch('/api/tokens', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token.value}`,
+          },
+          body: JSON.stringify({ texts }),
+        })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.message || res.statusText)
+        result.value = data.tokens
+      } catch (e) {
+        error.value = e.message
+      } finally {
+        loading.value = false
+      }
+    }
+
+    return { token, ja, zh, en, ko, loading, result, error, run }
+  }
+}).mount('#app')
+</script>
+</body>
+</html>

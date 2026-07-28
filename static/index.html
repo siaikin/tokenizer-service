@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tokenizer Service 控制面板</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+  <style>[v-cloak] { display: none; }</style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen font-sans">
+<div id="app" v-cloak>
+  <div v-if="!authed" class="flex items-center justify-center min-h-screen">
+    <div class="bg-gray-900 border border-gray-700 rounded-2xl p-8 w-full max-w-sm shadow-2xl">
+      <h1 class="text-xl font-bold mb-6 text-center">Tokenizer 控制面板</h1>
+      <label class="block text-sm text-gray-400 mb-1">Bearer Token</label>
+      <input v-model="tokenInput" type="password" placeholder="输入 TOKENIZER_TOKEN"
+        class="w-full bg-gray-800 border border-gray-600 rounded-lg px-3 py-2 text-sm mb-4 focus:outline-none focus:border-blue-500"
+        @keyup.enter="login" />
+      <button @click="login" class="w-full bg-blue-600 hover:bg-blue-500 text-white rounded-lg py-2 font-medium transition">进入</button>
+      <p v-if="loginError" class="text-red-400 text-sm mt-3 text-center">{{ loginError }}</p>
+    </div>
+  </div>
+
+  <div v-else class="max-w-7xl mx-auto px-4 py-6">
+    <div class="flex items-center justify-between mb-6">
+      <h1 class="text-2xl font-bold">Tokenizer 控制面板</h1>
+      <div class="flex items-center gap-3">
+        <a href="/test" class="text-sm text-gray-400 hover:text-white transition">分词测试</a>
+        <a href="/swagger-ui" class="text-sm text-gray-400 hover:text-white transition">Swagger</a>
+        <label class="relative inline-flex items-center cursor-pointer">
+          <input type="checkbox" v-model="autoRefresh" class="sr-only peer">
+          <div class="w-9 h-5 bg-gray-600 peer-checked:bg-blue-600 rounded-full transition after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition peer-checked:after:translate-x-4"></div>
+        </label>
+        <button @click="logout" class="text-sm text-gray-400 hover:text-white transition">退出</button>
+      </div>
+    </div>
+
+    <div v-if="stats" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
+      <div class="bg-gray-900 border border-gray-700 rounded-xl p-4 text-center"><div class="text-2xl font-bold">{{ stats.total }}</div><div class="text-xs text-gray-400 mt-1">总计</div></div>
+      <div class="bg-yellow-900/30 border border-yellow-700/40 rounded-xl p-4 text-center"><div class="text-2xl font-bold text-yellow-300">{{ stats.queued }}</div><div class="text-xs text-yellow-400 mt-1">排队</div></div>
+      <div class="bg-blue-900/30 border border-blue-700/40 rounded-xl p-4 text-center"><div class="text-2xl font-bold text-blue-300">{{ stats.running }}</div><div class="text-xs text-blue-400 mt-1">处理中</div></div>
+      <div class="bg-green-900/30 border border-green-700/40 rounded-xl p-4 text-center"><div class="text-2xl font-bold text-green-300">{{ stats.succeeded }}</div><div class="text-xs text-green-400 mt-1">成功</div></div>
+      <div class="bg-red-900/30 border border-red-700/40 rounded-xl p-4 text-center"><div class="text-2xl font-bold text-red-300">{{ stats.failed }}</div><div class="text-xs text-red-400 mt-1">失败</div></div>
+      <div class="bg-gray-800 border border-gray-700 rounded-xl p-4 text-center"><div class="text-2xl font-bold text-gray-300">{{ stats.cancelled }}</div><div class="text-xs text-gray-400 mt-1">取消</div></div>
+    </div>
+
+    <div v-if="stats" class="grid grid-cols-2 gap-3 mb-6">
+      <div class="bg-gray-900 border border-gray-700 rounded-xl p-4">
+        <div class="text-xs text-gray-400 mb-1">平均耗时</div>
+        <div class="text-xl font-semibold">{{ stats.avg_duration_ms != null ? stats.avg_duration_ms.toFixed(0) + ' ms' : '—' }}</div>
+      </div>
+      <div class="bg-gray-900 border border-gray-700 rounded-xl p-4">
+        <div class="text-xs text-gray-400 mb-1">累计输出字符</div>
+        <div class="text-xl font-semibold">{{ stats.total_output_chars ?? 0 }}</div>
+      </div>
+    </div>
+
+    <div class="bg-gray-900 border border-gray-700 rounded-xl overflow-hidden">
+      <table class="w-full text-sm">
+        <thead class="bg-gray-800 text-gray-400 text-left">
+          <tr>
+            <th class="px-3 py-2">时间</th>
+            <th class="px-3 py-2">状态</th>
+            <th class="px-3 py-2">语言</th>
+            <th class="px-3 py-2">文本数</th>
+            <th class="px-3 py-2">输入字</th>
+            <th class="px-3 py-2">输出字</th>
+            <th class="px-3 py-2">耗时</th>
+            <th class="px-3 py-2">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="r in items" :key="r.id" class="border-t border-gray-800 hover:bg-gray-800/50">
+            <td class="px-3 py-2 text-gray-400">{{ formatTime(r.created_at) }}</td>
+            <td class="px-3 py-2"><span class="px-2 py-0.5 rounded text-xs" :class="statusClass(r.status)">{{ r.status }}</span></td>
+            <td class="px-3 py-2">{{ r.langs || '—' }}</td>
+            <td class="px-3 py-2">{{ r.text_count ?? '—' }}</td>
+            <td class="px-3 py-2">{{ r.input_chars ?? '—' }}</td>
+            <td class="px-3 py-2">{{ r.output_chars ?? '—' }}</td>
+            <td class="px-3 py-2">{{ r.duration_ms != null ? r.duration_ms + 'ms' : '—' }}</td>
+            <td class="px-3 py-2">
+              <button v-if="r.status==='queued'||r.status==='running'" @click="cancel(r.id)" class="text-xs text-red-400 hover:text-red-300">取消</button>
+              <button @click="showDetail(r)" class="text-xs text-blue-400 hover:text-blue-300 ml-2">详情</button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div v-if="detail" class="fixed inset-0 bg-black/60 flex items-center justify-center p-4" @click.self="detail=null">
+      <div class="bg-gray-900 border border-gray-700 rounded-xl p-6 max-w-lg w-full">
+        <h2 class="font-bold mb-3">请求详情</h2>
+        <pre class="text-xs bg-gray-950 p-3 rounded overflow-auto max-h-80">{{ JSON.stringify(detail, null, 2) }}</pre>
+        <button @click="detail=null" class="mt-4 text-sm text-gray-400 hover:text-white">关闭</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+const { createApp, ref, onMounted, onUnmounted, watch } = Vue
+createApp({
+  setup() {
+    const token = ref(localStorage.getItem('tokenizer_token') || '')
+    const tokenInput = ref(token.value)
+    const authed = ref(false)
+    const loginError = ref('')
+    const stats = ref(null)
+    const items = ref([])
+    const autoRefresh = ref(true)
+    const detail = ref(null)
+    let timer = null
+
+    async function apiFetch(url, opts = {}) {
+      const res = await fetch(url, {
+        ...opts,
+        headers: { Authorization: `Bearer ${token.value}`, ...(opts.headers || {}) }
+      })
+      if (res.status === 401) { logout(); throw new Error('token 无效') }
+      return res
+    }
+
+    async function login() {
+      token.value = tokenInput.value.trim()
+      try {
+        const res = await apiFetch('/api/admin/stats')
+        if (!res.ok) throw new Error('鉴权失败')
+        localStorage.setItem('tokenizer_token', token.value)
+        authed.value = true
+        loginError.value = ''
+        await refresh()
+      } catch (e) {
+        loginError.value = e.message || '登录失败'
+        authed.value = false
+      }
+    }
+
+    function logout() {
+      authed.value = false
+      localStorage.removeItem('tokenizer_token')
+      token.value = ''
+    }
+
+    async function refresh() {
+      if (!authed.value) return
+      const [sRes, lRes] = await Promise.all([
+        apiFetch('/api/admin/stats'),
+        apiFetch('/api/admin/requests?limit=50')
+      ])
+      stats.value = await sRes.json()
+      const list = await lRes.json()
+      items.value = list.items || []
+    }
+
+    async function cancel(id) {
+      await apiFetch(`/api/admin/requests/${id}/cancel`, { method: 'POST' })
+      await refresh()
+    }
+
+    function showDetail(r) { detail.value = r }
+    function formatTime(iso) {
+      if (!iso) return '—'
+      try { return new Date(iso).toLocaleString() } catch { return iso }
+    }
+    function statusClass(s) {
+      return ({
+        queued: 'bg-yellow-900/50 text-yellow-300',
+        running: 'bg-blue-900/50 text-blue-300',
+        succeeded: 'bg-green-900/50 text-green-300',
+        failed: 'bg-red-900/50 text-red-300',
+        cancelled: 'bg-gray-700 text-gray-300',
+      })[s] || 'bg-gray-700'
+    }
+
+    onMounted(() => {
+      if (token.value) login()
+      timer = setInterval(() => { if (autoRefresh.value && authed.value) refresh() }, 3000)
+    })
+    onUnmounted(() => clearInterval(timer))
+    watch(autoRefresh, (v) => { if (v && authed.value) refresh() })
+
+    return { tokenInput, authed, loginError, stats, items, autoRefresh, detail, login, logout, cancel, showDetail, formatTime, statusClass }
+  }
+}).mount('#app')
+</script>
+</body>
+</html>
