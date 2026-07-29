@@ -11,6 +11,7 @@ mod tokenize;
 use std::{net::SocketAddr, sync::Arc};
 
 use axum::{
+    http::header,
     middleware,
     response::{Html, IntoResponse},
     routing::{get, post},
@@ -29,6 +30,7 @@ use tokenize::TokenizerEngine;
 
 static PANEL_HTML: &str = include_str!("../static/index.html");
 static TEST_HTML: &str = include_str!("../static/test.html");
+static LLMS_TXT: &str = include_str!("../static/llms.txt");
 
 #[tokio::main]
 async fn main() {
@@ -57,10 +59,6 @@ async fn main() {
 
     let protected = Router::new()
         .route("/api/tokens", post(routes::tokens::tokens_handler))
-        .route(
-            "/api/tokens/batch",
-            post(routes::tokens::tokens_batch_handler),
-        )
         .route("/api/admin/requests", get(routes::admin::list_requests))
         .route("/api/admin/requests/{id}", get(routes::admin::get_request))
         .route(
@@ -76,6 +74,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/health", get(routes::health::health))
+        .route("/llms.txt", get(llms_txt_handler))
         .route("/", get(panel_handler))
         .route("/test", get(test_handler))
         .merge(docs::swagger_router())
@@ -108,4 +107,11 @@ async fn panel_handler() -> impl IntoResponse {
 
 async fn test_handler() -> impl IntoResponse {
     Html(TEST_HTML)
+}
+
+async fn llms_txt_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        LLMS_TXT,
+    )
 }

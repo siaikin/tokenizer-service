@@ -1,6 +1,6 @@
 # Tokenizer Service
 
-CJK 分词 HTTP 服务（ja / ko / zh / latin），供 Jaburo admin Meilisearch 同步使用。
+CJK 分词 HTTP 服务（ja / ko / zh / latin）。
 
 对齐 `hdrify-service`：Bearer 鉴权、状态面板、请求日志、Swagger。
 
@@ -24,10 +24,27 @@ cargo run
 | 地址 | 说明 |
 |------|------|
 | `GET /health` | 健康检查（无需鉴权） |
+| `GET /llms.txt` | 给 LLM / AI agent 的集成说明（无需鉴权） |
 | `http://localhost:8080/` | 控制面板 |
 | `http://localhost:8080/test` | 分词测试页 |
 | `http://localhost:8080/swagger-ui` | Swagger UI |
 | `http://localhost:8080/api-docs/openapi.json` | OpenAPI JSON |
+
+## llms.txt
+
+面向 AI / coding agent 的接口与行为说明，遵循 [llms.txt](https://llmstxt.org/) 约定，启动后公开访问：
+
+```text
+http://localhost:8080/llms.txt
+```
+
+源文件：[`static/llms.txt`](static/llms.txt)。调用或修改本服务前，建议先拉取该文件作为上下文（含鉴权、`POST /api/tokens` 一对一契约、locale 规则、错误码与常见坑）。
+
+```bash
+curl -s http://localhost:8080/llms.txt
+```
+
+无需 Bearer。人类可读的使用说明见下文与 Swagger；机器向细节以 `llms.txt` 为准。
 
 ## Swagger
 
@@ -35,7 +52,7 @@ cargo run
 2. 点击右上角 **Authorize**，填入 `TOKENIZER_TOKEN` 的值（无需手写 `Bearer ` 前缀，Swagger 会自动加）
 3. 在 **tokenize** 分组试 `POST /api/tokens`，或在 **admin** 分组查看请求日志 / 统计
 
-分词与管理接口均需 Bearer；`/health`、面板、`/test`、Swagger 页面本身不需要。
+分词与管理接口均需 Bearer；`/health`、`/llms.txt`、面板、`/test`、Swagger 页面本身不需要。
 
 ## 鉴权
 
@@ -62,55 +79,22 @@ Authorization: Bearer <TOKENIZER_TOKEN>
 
 同一对象可写多种语言；所有 value 分词后**小写去重**，再空格拼接成一个字符串。空字符串 value 会被跳过。
 
-### `POST /api/tokens` — 合并分词
+### `POST /api/tokens` — 一对一分词
 
-将一组（或多个）localized text 合并成一条 tokens 字符串，适合一篇文档的多语言字段。
+`texts` 每项独立分词，返回等长 `results`。
 
 **请求**
 
 ```json
 {
   "texts": [
-    { "ja": "ガンダム", "zh-Hans": "高达", "en-US": "Gundam" }
+    { "ja": "ガンダム", "zh-Hans": "高达" },
+    { "en-US": "Mobile Suit", "zh-Hans": "机动战士" }
   ]
 }
 ```
 
-`texts` 不能为空。也可传多项，例如标题、简介各一个 map，tokens 仍合并到同一结果。
-
-**响应**
-
-```json
-{
-  "tokens": "ガンダム 高达 gundam"
-}
-```
-
-**curl**
-
-```bash
-curl -s http://localhost:8080/api/tokens \
-  -H "Authorization: Bearer $TOKENIZER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"texts":[{"ja":"ガンダム","zh-Hans":"高达","en-US":"Gundam"}]}'
-```
-
-### `POST /api/tokens/batch` — 批量分词
-
-每项独立分词，返回与 `items` 等长的 `results`，适合一次索引多条文档。
-
-**请求**
-
-```json
-{
-  "items": [
-    [{ "ja": "ガンダム", "zh-Hans": "高达" }],
-    [{ "en-US": "Mobile Suit", "zh-Hans": "机动战士" }]
-  ]
-}
-```
-
-每项形态与 `/api/tokens` 的 `texts` 相同（`Vec` of locale maps）。
+`texts` 不能为空，最多 500 条。
 
 **响应**
 
@@ -126,10 +110,10 @@ curl -s http://localhost:8080/api/tokens \
 **curl**
 
 ```bash
-curl -s http://localhost:8080/api/tokens/batch \
+curl -s http://localhost:8080/api/tokens \
   -H "Authorization: Bearer $TOKENIZER_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"items":[[{"ja":"ガンダム","zh-Hans":"高达"}],[{"en-US":"Mobile Suit","zh-Hans":"机动战士"}]]}'
+  -d '{"texts":[{"ja":"ガンダム","zh-Hans":"高达"},{"en-US":"Mobile Suit","zh-Hans":"机动战士"}]}'
 ```
 
 ### 管理接口

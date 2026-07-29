@@ -1,5 +1,4 @@
-/// CJK + latin 分词引擎，对齐 jaburo `MeiliTokenizer` 行为：
-/// 按 locale 分词 → 小写去重 → 空格拼接。
+/// CJK + latin 分词引擎：按 locale 选择分词器 → 小写去重 → 空格拼接。
 use std::collections::{BTreeSet, HashMap};
 
 use jieba_rs::Jieba;
@@ -37,21 +36,20 @@ impl TokenizerEngine {
         Ok(Self { ja, ko, zh })
     }
 
-    pub fn tokens_from_texts(&self, texts: &[HashMap<String, String>]) -> String {
+    /// 对单个 locale→text map 分词：各 locale 结果小写去重后空格拼接。
+    pub fn tokens_from_map(&self, texts: &HashMap<String, String>) -> String {
         let mut seen = BTreeSet::new();
         let mut parts: Vec<String> = Vec::new();
 
-        for lt in texts {
-            for (locale, raw) in lt {
-                let text = raw.trim();
-                if text.is_empty() {
-                    continue;
-                }
-                for token in self.tokenize_by_locale(text, locale) {
-                    let key = token.to_lowercase();
-                    if seen.insert(key) {
-                        parts.push(token);
-                    }
+        for (locale, raw) in texts {
+            let text = raw.trim();
+            if text.is_empty() {
+                continue;
+            }
+            for token in self.tokenize_by_locale(text, locale) {
+                let key = token.to_lowercase();
+                if seen.insert(key) {
+                    parts.push(token);
                 }
             }
         }

@@ -1,0 +1,419 @@
+# Tokenizer Service
+
+> CJK/Latin tokenizer HTTP API (ja / ko / zh / latin). Bearer auth. One-to-one `POST /api/tokens` → `{ "results": [...] }` (max 500). No batch endpoint.
+
+This file is the AI / LLM integration reference. Served publicly at `GET /llms.txt` (no auth). Source of truth: this file + `src/`; if they disagree, trust the code.
+
+## Docs
+
+- [OpenAPI JSON](/api-docs/openapi.json): machine-readable OpenAPI schema
+- [Swagger UI](/swagger-ui): interactive API explorer (Authorize with TOKENIZER_TOKEN)
+- [Health](/health): liveness probe, plain text `ok`
+- [Test page](/test): browser tokenize UI
+- [Control panel](/): request stats dashboard
+
+## Optional
+
+- [README](https://github.com/siaikin/tokenizer-service/blob/main/README.md): human-oriented setup and usage
+
+---
+
+## 0. Quick facts
+
+| Item | Value |
+|------|--------|
+| Role | HTTP CJK/Latin tokenizer (ja / ko / zh / latin) |
+| Stack | Rust 2021 (MSRV 1.85), Axum 0.8, Tokio, SQLite (sqlx), Lindera, jieba-rs |
+| Auth | `Authorization: Bearer <TOKENIZER_TOKEN>` |
+| Tokenize API | **Only** `POST /api/tokens` |
+| Removed | `POST /api/tokens/batch` — **do not call or reintroduce** unless explicitly requested |
+| Contract | One-to-one: `texts[i]` → `results[i]` (same length always) |
+| Max items | 500 per request |
+| Output unit | Space-joined string per item (not a JSON array of tokens) |
+
+---
+
+## 1. MUST / MUST NOT
+
+### When calling the API
+
+- **MUST** send Bearer token on all `/api/*` routes except `GET /health`.
+- **MUST** use body shape `{ "texts": [ { "<locale>": "<text>", ... }, ... ] }`.
+- **MUST** expect `{ "results": ["...", ...] }` with `results.length === texts.length`.
+- **MUST NOT** expect a single `tokens` string field (legacy; removed).
+- **MUST NOT** call `/api/tokens/batch` (removed).
+- **MUST NOT** assume token order inside one string is stable when a map has multiple locales (`HashMap` iteration order is undefined).
+- **MUST NOT** assume CJK tokens are lowercased in the output string (only Latin is; dedupe is case-insensitive).
+
+### When modifying the codebase
+
+- **MUST** keep one-to-one semantics unless the user asks otherwise.
+- **MUST** keep locale → engine mapping in `src/tokenize.rs` (`locale_kind`).
+- **MUST NOT** re-bind API docs/comments to a specific downstream (e.g. Meilisearch) unless asked.
+- **MUST NOT** add exploit/PoC code. Local vulnerability fixes only if requested.
+- Prefer editing existing modules over new layers; match existing Chinese error/log style.
+
+---
+
+## 2. Auth & public routes
+
+**Header:** `Authorization: Bearer <TOKENIZER_TOKEN>`  
+Prefix must be exactly `Bearer ` (one space). Value compared to env `TOKENIZER_TOKEN` (constant-time).
+
+| Path | Auth |
+|------|------|
+| `GET /health` | public → body `ok` (plain text) |
+| `GET /` | public → control panel HTML |
+| `GET /test` | public → test page HTML |
+| `GET /swagger-ui`, `/api-docs/openapi.json` | public |
+| `POST /api/tokens` | Bearer |
+| `GET /api/admin/*`, `POST /api/admin/requests/{id}/cancel` | Bearer |
+
+Missing/wrong token → `401` with body `{ "code": "UNAUTHORIZED", "message": "鉴权失败" }`.
+
+---
+
+## 3. `POST /api/tokens` — full contract
+
+### 3.1 Request
+
+```json
+{
+  "texts": [
+    { "ja": "ガンダム", "zh-Hans": "高达" },
+    { "en-US": "Mobile Suit" }
+  ]
+}
+```
+
+| Field | Type | Rules |
+|-------|------|--------|
+| `texts` | array of objects | Required; length ≥ 1 and ≤ 500 |
+| object key | string (locale) | Selects tokenizer; **not** returned |
+| object value | string | `trim()`; empty → skip that value |
+
+**Validation (`400`, `code: BAD_REQUEST`):**
+
+| Condition | `message` (contains) |
+|-----------|----------------------|
+| `texts` empty | `texts 不能为空` |
+| `texts.len() > 500` | `texts 最多 500 条` |
+
+Malformed JSON may surface as bad request via serde.
+
+### 3.2 Success response (`200`)
+
+```json
+{
+  "results": ["ガンダム 高达", "mobile suit"]
+}
+```
+
+| Field | Invariant |
+|-------|-----------|
+| `results` | `Vec<String>`, **same length as `texts`** |
+| `results[i]` | Tokens from `texts[i]` only; never merged across indices |
+| Empty map / all-empty values | `results[i] === ""` (slot still present) |
+
+**Response headers (success path only):**
+
+| Header | Meaning |
+|--------|---------|
+| `x-request-id` | UUID of SQLite request log row |
+| `x-duration-ms` | Tokenization wall time (ms) after status → running |
+
+Error responses do **not** attach these headers (a DB row may still exist).
+
+### 3.3 Locale → tokenizer
+
+Locale is classified with `to_ascii_lowercase()` then:
+
+| Match | Engine | Implementation |
+|-------|--------|----------------|
+| `ja` or `ja-*` | Japanese | Lindera embedded IPADIC |
+| `ko` or `ko-*` | Korean | Lindera embedded ko-dic |
+| starts with `zh`, or exact `cmn` | Chinese | jieba (`cut`, HMM off) |
+| everything else | Latin | lowercase + split on `[^\p{L}\p{N}]+` |
+
+Examples: `ja`, `ja-JP` → ja; `ko-KR` → ko; `zh`, `zh-Hans`, `zhHans` → zh; `en`, `en-US`, `fr` → latin.  
+`jp` is **not** Japanese → latin.
+
+### 3.4 Per-map algorithm (`tokens_from_map`)
+
+For one `HashMap<String, String>`:
+
+1. Iterate `(locale, raw)` pairs (**order undefined**).
+2. `text = raw.trim()`; skip if empty.
+3. Tokenize with engine for `locale`.
+4. For each token: dedupe key = `token.to_lowercase()` via `BTreeSet`; if new, **push original `token`** (not the lowercased key).
+5. Return `parts.join(" ")`.
+
+**Engine notes:**
+
+- **Latin:** input lowercased before split → emitted tokens are lowercase.
+- **ja / ko:** Lindera `surface`; on failure → fall back to latin tokenizer (warn log).
+- **zh:** jieba surfaces as-is (typically no Latin-style lowercasing).
+
+**Implication:** README phrase “小写去重” means **case-insensitive dedupe**; output casing for CJK is **not** forced to lowercase.
+
+### 3.5 Client pseudocode
+
+```text
+FUNCTION tokenize(baseUrl, bearerToken, texts):
+  ASSERT texts.length >= 1 AND texts.length <= 500
+  resp = HTTP POST baseUrl + "/api/tokens"
+    headers: Authorization = "Bearer " + bearerToken
+             Content-Type = application/json
+    body: { "texts": texts }
+  IF resp.status != 200:
+    PARSE { code, message }; RAISE
+  PARSE { results }
+  ASSERT results.length == texts.length
+  RETURN results
+```
+
+### 3.6 curl examples
+
+```bash
+# Health
+curl -s http://localhost:8080/health
+
+# Tokenize (one-to-one)
+curl -s http://localhost:8080/api/tokens \
+  -H "Authorization: Bearer $TOKENIZER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"texts":[{"ja":"ガンダム","zh-Hans":"高达"},{"en-US":"Mobile Suit","zh-Hans":"机动战士"}]}'
+
+# Empty values / empty map still yield aligned results
+curl -s http://localhost:8080/api/tokens \
+  -H "Authorization: Bearer $TOKENIZER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"texts":[{"en":"Hello World"},{"ja":""},{}]}'
+# → {"results":["hello world","",""]}
+```
+
+---
+
+## 4. Admin APIs
+
+All require Bearer.
+
+### 4.1 `GET /api/admin/stats`
+
+```json
+{
+  "total": 0,
+  "queued": 0,
+  "running": 0,
+  "succeeded": 0,
+  "failed": 0,
+  "cancelled": 0,
+  "avg_duration_ms": null,
+  "total_output_chars": null
+}
+```
+
+`avg_duration_ms` / `total_output_chars` derived from succeeded rows only (may be null).
+
+### 4.2 `GET /api/admin/requests`
+
+Query:
+
+| Param | Default | Clamp |
+|-------|---------|--------|
+| `status` | omit = all | `queued` \| `running` \| `succeeded` \| `failed` \| `cancelled` |
+| `limit` | `20` | 1–100 |
+| `offset` | `0` | ≥ 0 |
+
+Response:
+
+```json
+{
+  "total": 1,
+  "limit": 20,
+  "offset": 0,
+  "items": [ /* RequestRow */ ]
+}
+```
+
+Order: `created_at DESC`.
+
+### 4.3 `GET /api/admin/requests/{id}`
+
+Path `{id}` = UUID (same as `x-request-id`).  
+`404` if missing.
+
+### 4.4 `POST /api/admin/requests/{id}/cancel`
+
+```json
+{ "cancelled": true, "message": "取消信号已发送" }
+```
+
+or `cancelled: false` if not currently inflight. Bad UUID → `400`; unknown id → `404`.
+
+**Cancel is cooperative:** checked before and after `spawn_blocking` work. Mid-tokenization is **not** aborted. If cancel wins after work finishes, client may get `499` and the result is discarded.
+
+### 4.5 `RequestRow` fields
+
+| Field | Notes |
+|-------|--------|
+| `id` | UUID string |
+| `created_at` / `started_at` / `finished_at` | timestamps; latter two optional |
+| `status` | `queued` \| `running` \| `succeeded` \| `failed` \| `cancelled` |
+| `client_ip` | optional |
+| `text_count` | count of **non-empty locale values** across all maps (not `texts.len()`) |
+| `input_chars` | sum of char counts of non-empty values |
+| `output_chars` | sum of `results[i].chars().count()` on success |
+| `langs` | sorted unique engine labels joined by `,` e.g. `ja,latin,zh` |
+| `duration_ms` | optional |
+| `error` | optional |
+
+---
+
+## 5. Errors
+
+Uniform JSON:
+
+```json
+{ "code": "<CODE>", "message": "<string>" }
+```
+
+| HTTP | `code` | When |
+|------|--------|------|
+| 400 | `BAD_REQUEST` | validation / bad UUID / JSON issues |
+| 401 | `UNAUTHORIZED` | auth |
+| 404 | `NOT_FOUND` | missing request |
+| 499 | `CANCELLED` | cancelled while handling tokenize |
+| 500 | `INTERNAL_ERROR` | DB / semaphore / join failures |
+
+`message` is often Chinese (from `thiserror` Display).
+
+---
+
+## 6. Environment
+
+| Variable | Required | Default | Meaning |
+|----------|----------|---------|---------|
+| `TOKENIZER_TOKEN` | **yes** | — | Bearer secret (missing → panic on boot) |
+| `TOKENIZER_BIND` | no | `0.0.0.0:8080` | listen address |
+| `TOKENIZER_DB_PATH` | no | `/data/tokenizer.db` | SQLite path (local: `./data/tokenizer.db`) |
+| `TOKENIZER_MAX_CONCURRENCY` | no | CPU logical cores (fallback 4) | CPU-bound tokenize semaphore |
+| `TOKENIZER_MAX_BODY_MB` | no | `8` | request body limit |
+
+Build/run tip: Lindera dict fetch often needs:
+
+```bash
+./scripts/fetch-lindera-dicts.sh
+export LINDERA_CACHE="$PWD/.lindera-cache"
+```
+
+Logging: `RUST_LOG` / tracing `EnvFilter` (default `tokenizer_service=info,tower_http=info`).
+
+---
+
+## 7. Request lifecycle (`POST /api/tokens`)
+
+```text
+validate texts
+→ UUID + insert_request (queued) + client IP
+→ register_inflight(CancellationToken)
+→ acquire cpu_sem
+→ if cancelled → mark_cancelled → 499
+→ mark_running
+→ spawn_blocking: for each map → tokens_from_map
+→ if cancelled → mark_cancelled → 499
+→ mark_succeeded(output_chars, duration_ms)
+→ remove_inflight
+→ 200 + results + x-request-id + x-duration-ms
+```
+
+Concurrency: at most `TOKENIZER_MAX_CONCURRENCY` tokenize jobs in blocking pool at once; excess wait on semaphore.
+
+---
+
+## 8. Repo map (for code changes)
+
+```
+src/
+  main.rs          # router: public vs protected
+  config.rs        # env loading
+  auth.rs          # Bearer middleware
+  error.rs         # AppError → HTTP + JSON
+  state.rs         # AppState, semaphore, inflight cancel map
+  tokenize.rs      # TokenizerEngine, locale_kind, tokens_from_map, summarize_texts
+  db.rs            # SQLite schema + request log CRUD
+  docs.rs          # OpenAPI / Swagger description
+  routes/
+    tokens.rs      # POST /api/tokens only
+    admin.rs       # stats, list, get, cancel
+    health.rs      # GET /health
+static/
+  index.html       # panel
+  test.html        # calls /api/tokens, reads data.results
+  llms.txt         # this file (also GET /llms.txt)
+```
+
+Key symbols:
+
+- `TokenizerEngine::tokens_from_map` — single-item tokenization
+- `tokens_handler` — HTTP one-to-one loop
+- `summarize_texts` — metrics for DB (`text_count`, `langs`, `input_chars`)
+
+---
+
+## 9. Gotchas (read before integrating)
+
+1. **No batch endpoint.** Put up to 500 maps in one `texts` array.
+2. **Aligned empty strings.** Empty or all-skipped maps still consume a `results` slot.
+3. **Multi-locale order unstable.** Do not snapshot-test exact token order across locales in one map without sorting.
+4. **Casing asymmetry.** Latin lowercased; CJK surfaces kept; dedupe uses lowercase keys.
+5. **`zh` matching is prefix.** `zhHans` (no hyphen) still → Chinese; `cmn` must be exact.
+6. **Cancel race.** Possible `499` after work completed; do not assume cancel only when idle.
+7. **Meta headers only on success** of `/api/tokens`.
+8. **CORS** is wide open (any origin/method/header) — do not rely on browser CORS for security; Bearer is the gate.
+9. **Dead code warning:** `db::mark_failed` may be unused; harmless unless you wire failure paths.
+
+---
+
+## 10. Breaking changes already applied (do not regress)
+
+| Legacy | Current |
+|--------|---------|
+| `POST /api/tokens` merged all maps → one `tokens` string | one-to-one → `results[]` |
+| `POST /api/tokens/batch` with nested `items: Vec<Vec<Map>>` | **removed** |
+| Docs framed as Meilisearch document merge | generic tokenizer service |
+
+If a caller still sends old shapes or expects `data.tokens`, update the caller.
+
+---
+
+## 11. Suggested checks after your change
+
+```bash
+# Compile
+cargo check
+
+# Run (example)
+mkdir -p data
+export LINDERA_CACHE="$PWD/.lindera-cache"
+set -a && source .env && set +a
+cargo run
+
+# Smoke
+curl -s http://localhost:8080/health
+curl -s http://localhost:8080/api/tokens \
+  -H "Authorization: Bearer $TOKENIZER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"texts":[{"en-US":"Hello"},{"ja":"テスト"}]}'
+```
+
+Expect HTTP 200 and JSON `results` length 2.
+
+---
+
+## 12. What this service is not
+
+- Not a general NLP pipeline (no POS filtering, stemming, or ranking beyond space-join).
+- Not a search engine; it only produces token strings.
+- Not multi-tenant beyond shared Bearer secret.
+- Not streaming; full request body then full response.

@@ -77,7 +77,9 @@ createApp({
         })
         const data = await res.json()
         if (!res.ok) throw new Error(data.message || res.statusText)
-        result.value = data.tokens
+        result.value = Array.isArray(data.results)
+          ? data.results.join('\n')
+          : JSON.stringify(data, null, 2)
       } catch (e) {
         error.value = e.message
       } finally {

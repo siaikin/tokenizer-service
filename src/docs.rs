@@ -8,28 +8,28 @@ use crate::routes::admin::{
     __path_cancel_request, __path_get_request, __path_get_stats, __path_list_requests,
 };
 use crate::routes::health::__path_health;
-use crate::routes::tokens::{__path_tokens_batch_handler, __path_tokens_handler};
+use crate::routes::tokens::__path_tokens_handler;
 
 use crate::{
     db::{RequestRow, RequestStatus, StatsRow},
     routes::admin::{CancelResponse, ListResponse},
-    routes::tokens::{
-        TokensBatchRequest, TokensBatchResponse, TokensRequest, TokensResponse,
-    },
+    routes::tokens::{TokensRequest, TokensResponse},
 };
 
 const API_DESCRIPTION: &str = r#"
-CJK 分词 HTTP 服务（ja / ko / zh / latin），输出适合 Meilisearch 索引的 tokens 字符串。
+CJK 分词 HTTP 服务（ja / ko / zh / latin），按 locale 分词后输出小写去重、空格拼接的 tokens 字符串。
 
 ## 鉴权
 
 点击右上角 **Authorize**，填入环境变量 `TOKENIZER_TOKEN` 的值（无需手写 `Bearer ` 前缀）。
 
-除 `/health` 外，分词与管理接口均需：
+除 `/health`、`/llms.txt`、面板与 Swagger 外，分词与管理接口均需：
 
 ```
 Authorization: Bearer <TOKENIZER_TOKEN>
 ```
+
+AI / LLM 集成说明见公开地址 `GET /llms.txt`。
 
 ## Locale key（有意义）
 
@@ -46,8 +46,7 @@ Authorization: Bearer <TOKENIZER_TOKEN>
 
 ## 接口概览
 
-- `POST /api/tokens` — 合并分词（一篇文档的多语言字段 → 一条 tokens）
-- `POST /api/tokens/batch` — 批量分词（每项独立结果，最多 500 条）
+- `POST /api/tokens` — 一对一分词（`texts[i]` → `results[i]`，最多 500 条）
 - `GET /api/admin/*` — 请求日志与统计
 "#;
 
@@ -82,7 +81,6 @@ impl Modify for BearerSecurityAddon {
     paths(
         health,
         tokens_handler,
-        tokens_batch_handler,
         list_requests,
         get_request,
         cancel_request,
@@ -91,8 +89,6 @@ impl Modify for BearerSecurityAddon {
     components(schemas(
         TokensRequest,
         TokensResponse,
-        TokensBatchRequest,
-        TokensBatchResponse,
         RequestRow,
         RequestStatus,
         StatsRow,
