@@ -18,35 +18,67 @@ use crate::{
     tokenize::summarize_texts,
 };
 
+/// 合并分词请求：一组（或多个）locale → 文本 map，合并为一条 tokens。
 #[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "texts": [
+        { "ja": "ガンダム", "zh-Hans": "高达", "en-US": "Gundam" }
+    ]
+}))]
 pub struct TokensRequest {
-    /// 一个或多个 localized text 对象，例如 `{ "ja": "ガンダム", "zh-Hans": "高达" }`
+    /// 一个或多个 localized text 对象。key 为 locale（决定分词器），value 为文本。
+    ///
+    /// - `ja` / `ja-*` → 日文
+    /// - `ko` / `ko-*` → 韩文
+    /// - `zh*` / `cmn` → 中文
+    /// - 其它 → Latin
+    ///
+    /// 不能为空。多项时仍合并到同一条结果。
     pub texts: Vec<HashMap<String, String>>,
 }
 
+/// 合并分词响应。
 #[derive(Debug, Serialize, ToSchema)]
+#[schema(example = json!({ "tokens": "ガンダム 高达 gundam" }))]
 pub struct TokensResponse {
+    /// 所有输入分词后小写去重、空格拼接的字符串
     pub tokens: String,
 }
 
+/// 批量分词请求：每项独立分词，返回等长 `results`。
 #[derive(Debug, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "items": [
+        [{ "ja": "ガンダム", "zh-Hans": "高达" }],
+        [{ "en-US": "Mobile Suit", "zh-Hans": "机动战士" }]
+    ]
+}))]
 pub struct TokensBatchRequest {
-    /// 每项是一组 localized text maps（与 `/api/tokens` 的 `texts` 同形）
+    /// 每项形态与 `/api/tokens` 的 `texts` 相同。不能为空；最多 500 条。
     pub items: Vec<Vec<HashMap<String, String>>>,
 }
 
+/// 批量分词响应。
 #[derive(Debug, Serialize, ToSchema)]
+#[schema(example = json!({
+    "results": ["ガンダム 高达", "mobile suit 机动战士"]
+}))]
 pub struct TokensBatchResponse {
+    /// 与 `items` 等长的 tokens 字符串列表
     pub results: Vec<String>,
 }
 
-/// POST /api/tokens — 合并分词
+/// 合并分词：一篇文档的多语言字段 → 一条 tokens 字符串。
+///
+/// 响应头含 `x-request-id`、`x-duration-ms`。
 #[utoipa::path(
     post,
     path = "/api/tokens",
+    description = "将 `texts` 中所有 locale 文本分词后合并为一条 tokens。key 选择分词器（ja/ko/zh/latin），value 为空则跳过。",
     request_body = TokensRequest,
     responses(
-        (status = 200, body = TokensResponse),
+        (status = 200, description = "分词成功", body = TokensResponse),
+        (status = 400, description = "texts 为空等参数错误"),
         (status = 401, description = "未授权"),
     ),
     security(("bearer_auth" = [])),
@@ -114,13 +146,17 @@ pub async fn tokens_handler(
     ))
 }
 
-/// POST /api/tokens/batch — 批量分词（每项独立结果）
+/// 批量分词：每项独立结果，适合一次索引多条文档。
+///
+/// 响应头含 `x-request-id`、`x-duration-ms`。
 #[utoipa::path(
     post,
     path = "/api/tokens/batch",
+    description = "对 `items` 中每一项单独调用与 `/api/tokens` 相同的合并分词逻辑；`results[i]` 对应 `items[i]`。最多 500 条。",
     request_body = TokensBatchRequest,
     responses(
-        (status = 200, body = TokensBatchResponse),
+        (status = 200, description = "分词成功", body = TokensBatchResponse),
+        (status = 400, description = "items 为空或超过 500 条"),
         (status = 401, description = "未授权"),
     ),
     security(("bearer_auth" = [])),
